@@ -1,0 +1,15 @@
+server:
+  port: 8081
+
+spring:
+  kafka:
+    bootstrap-servers: kafka:9092
+    streams:
+      application-id: event-transformer
+
+app:
+  service:
+    url: http://app:8080
+  topics:
+    input: dbserver1.public.event
+    output: event-details
