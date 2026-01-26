@@ -3,8 +3,8 @@ services:
     image: confluentinc/cp-zookeeper:7.5.0
     hostname: zookeeper
     container_name: zookeeper
-    ports:
-      - "2181:2181"
+#    ports:
+#      - "2181:2181"
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
       ZOOKEEPER_TICK_TIME: 2000
@@ -22,8 +22,8 @@ services:
       zookeeper:
         condition: service_healthy
     ports:
-      - "9092:9092"
-      - "29092:29092"
+      - "19092:9092"
+#      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -44,8 +44,8 @@ services:
     image: postgres:16
     hostname: postgres
     container_name: postgres
-    ports:
-      - "5432:5432"
+#    ports:
+#      - "5432:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -72,7 +72,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "8083:8083"
+      - "8084:8083"
     environment:
       BOOTSTRAP_SERVERS: kafka:9092
       GROUP_ID: connect-cluster
@@ -93,16 +93,14 @@ services:
       retries: 10
 
   app:
-    build:
-      context: ..
-      dockerfile: app/Dockerfile
+    image: kafka-connect-etl/app:latest
     hostname: app
     container_name: app
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "8082:8080"
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/eventdb
       SPRING_DATASOURCE_USERNAME: postgres
@@ -114,9 +112,7 @@ services:
       retries: 10
 
   transformer:
-    build:
-      context: ..
-      dockerfile: transformer/Dockerfile
+    image: kafka-connect-etl/transformer:latest
     hostname: transformer
     container_name: transformer
     depends_on:
@@ -124,11 +120,25 @@ services:
         condition: service_healthy
       app:
         condition: service_healthy
+      register-connector:
+        condition: service_completed_successfully
     ports:
       - "8081:8081"
     environment:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       APP_SERVICE_URL: http://app:8080
+
+  register-connector:
+    image: curlimages/curl:latest
+    container_name: register-connector
+    depends_on:
+      kafka-connect:
+        condition: service_healthy
+      app:
+        condition: service_healthy
+    volumes:
+      - ./docker/connect/register-connector.json:/config/register-connector.json:ro
+    command: ["-X", "POST", "-H", "Content-Type: application/json", "--data", "@/config/register-connector.json", "http://kafka-connect:8083/connectors"]
 
 volumes:
   postgres_data:

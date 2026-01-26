@@ -50,10 +50,10 @@ public class EventTransformerStream {
 
     private String extractAndEnrichEvent(String cdcPayload) {
         try {
+            logger.info("Got payload {}", cdcPayload);
             JsonNode root = objectMapper.readTree(cdcPayload);
-            JsonNode payload = root.path("payload");
 
-            JsonNode after = payload.path("after");
+            JsonNode after = root.path("after");
             if (after.isMissingNode() || after.isNull()) {
                 logger.debug("No 'after' field in CDC payload, skipping delete event");
                 return null;

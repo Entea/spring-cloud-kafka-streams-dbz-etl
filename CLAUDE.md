@@ -22,12 +22,15 @@ mvn -pl integration-tests verify
 ## Running the Application
 
 ```bash
-# Start all infrastructure (from docker/ directory)
-cd docker && docker-compose up -d
+# Build Docker images for app and transformer
+./build-images.sh
+
+# Start all infrastructure
+docker-compose up -d
 
 # Register Debezium connector (after services are healthy)
 curl -X POST -H "Content-Type: application/json" \
-  --data @connect/register-connector.json \
+  --data @docker/connect/register-connector.json \
   http://localhost:8083/connectors
 
 # Check connector status
