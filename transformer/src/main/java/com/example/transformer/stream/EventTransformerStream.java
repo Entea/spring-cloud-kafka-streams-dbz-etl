@@ -55,7 +55,7 @@ public class EventTransformerStream {
 
             JsonNode after = root.path("after");
             if (after.isMissingNode() || after.isNull()) {
-                logger.debug("No 'after' field in CDC payload, skipping delete event");
+                logger.warn("No 'after' field in CDC payload, skipping delete event");
                 return null;
             }
 

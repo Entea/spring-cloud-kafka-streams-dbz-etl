@@ -7,6 +7,29 @@ spring:
     streams:
       application-id: event-transformer
 
+      # Threading - set to number of input topic partitions for max parallelism
+      num-stream-threads: 1
+
+      # Batching & Latency
+      commit-interval-ms: 1000       # Offset commit frequency (ms)
+      cache-max-bytes-buffering: 10485760  # Record cache size (10MB)
+      poll-ms: 100                   # Max poll blocking time (ms)
+
+      # Consumer tuning
+      max-poll-records: 1000         # Max records per poll
+      fetch-max-bytes: 52428800      # Max fetch size (50MB)
+      fetch-max-wait-ms: 500         # Max broker wait time (ms)
+
+      # Producer tuning
+      batch-size: 16384              # Producer batch size (16KB)
+      linger-ms: 100                 # Batch fill wait time (ms)
+      buffer-memory: 33554432        # Producer buffer (32MB)
+      compression-type: none         # none, gzip, snappy, lz4, zstd
+
+      # Reliability
+      processing-guarantee: at_least_once  # at_least_once, exactly_once, exactly_once_v2
+      replication-factor: 1          # Internal topic replication (use 3 in prod)
+
 app:
   service:
     url: http://app:8080
