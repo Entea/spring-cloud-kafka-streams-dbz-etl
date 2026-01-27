@@ -12,7 +12,7 @@ spring:
 
       # Batching & Latency
       commit-interval-ms: 1000       # Offset commit frequency (ms)
-      cache-max-bytes-buffering: 10485760  # Record cache size (10MB)
+      state-store-cache-max-size: 10485760
       poll-ms: 100                   # Max poll blocking time (ms)
 
       # Consumer tuning
@@ -36,3 +36,5 @@ app:
   topics:
     input: dbserver1.public.event
     output: event-details
+    animal-input: dbserver1.public.animal
+    animal-output: animal-details

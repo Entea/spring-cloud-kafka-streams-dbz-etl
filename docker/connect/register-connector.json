@@ -8,7 +8,7 @@
     "database.password": "postgres",
     "database.dbname": "eventdb",
     "topic.prefix": "dbserver1",
-    "table.include.list": "public.event",
+    "table.include.list": "public.event,public.animal",
     "plugin.name": "pgoutput",
     "slot.name": "event_slot",
     "publication.name": "event_publication",
