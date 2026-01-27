@@ -1,13 +1,13 @@
 package com.example.transformer.controller;
 
 import com.example.transformer.avro.AnimalDetails;
+import com.example.transformer.avro.RecordKey;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.confluent.kafka.serializers.KafkaAvroSerializer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import org.apache.kafka.common.serialization.StringSerializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -30,14 +30,14 @@ public class ManualAnimalExportController {
     private static final String OUTPUT_TOPIC = "animal-details";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final KafkaProducer<String, AnimalDetails> producer;
+    private final KafkaProducer<RecordKey, AnimalDetails> producer;
 
     public ManualAnimalExportController(
             @Value("${spring.cloud.stream.kafka.streams.binder.brokers}") String brokers,
             @Value("${spring.cloud.stream.kafka.streams.binder.configuration.schema.registry.url}") String schemaRegistryUrl) {
         Map<String, Object> config = new HashMap<>();
         config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers);
-        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, KafkaAvroSerializer.class);
         config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, KafkaAvroSerializer.class);
         config.put("schema.registry.url", schemaRegistryUrl);
         this.producer = new KafkaProducer<>(config);
@@ -62,7 +62,11 @@ public class ManualAnimalExportController {
                     .setBreed(after.path("breed").asText(""))
                     .build();
 
-            producer.send(new ProducerRecord<>(OUTPUT_TOPIC, enriched));
+            RecordKey key = RecordKey.newBuilder()
+                    .setId(enriched.getId())
+                    .build();
+
+            producer.send(new ProducerRecord<>(OUTPUT_TOPIC, key, enriched));
             producer.flush();
             logger.info("Manual animal export sent to {}", OUTPUT_TOPIC);
             return ResponseEntity.ok(enriched.toString());

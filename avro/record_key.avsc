@@ -1,0 +1,8 @@
+{
+  "type": "record",
+  "name": "RecordKey",
+  "namespace": "com.example.transformer.avro",
+  "fields": [
+    {"name": "id", "type": "long"}
+  ]
+}

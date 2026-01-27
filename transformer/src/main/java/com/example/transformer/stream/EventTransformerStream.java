@@ -1,6 +1,7 @@
 package com.example.transformer.stream;
 
 import com.example.transformer.avro.EventDetails;
+import com.example.transformer.avro.RecordKey;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.avro.generic.GenericRecord;
@@ -26,11 +27,12 @@ public class EventTransformerStream {
     private String appServiceUrl;
 
     @Bean
-    public Function<KStream<String, GenericRecord>, KStream<String, EventDetails>> eventTransform() {
+    public Function<KStream<GenericRecord, GenericRecord>, KStream<RecordKey, EventDetails>> eventTransform() {
         return stream -> stream
                 .filter((key, value) -> value != null)
                 .mapValues(this::extractAndEnrichEvent)
-                .filter((key, value) -> value != null);
+                .filter((key, value) -> value != null)
+                .selectKey((key, value) -> RecordKey.newBuilder().setId(value.getId()).build());
     }
 
     private EventDetails extractAndEnrichEvent(GenericRecord envelope) {

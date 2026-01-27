@@ -101,9 +101,9 @@ services:
       CONFIG_STORAGE_REPLICATION_FACTOR: 1
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
-      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER: io.confluent.connect.avro.AvroConverter
       VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
-      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      KEY_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
       VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
