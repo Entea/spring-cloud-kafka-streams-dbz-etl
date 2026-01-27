@@ -71,6 +71,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      app:
+        condition: service_healthy
     ports:
       - "8084:8083"
     environment:
@@ -155,7 +157,12 @@ services:
         condition: service_healthy
     volumes:
       - ./docker/connect/register-connector.json:/config/register-connector.json:ro
-    command: ["-X", "POST", "-H", "Content-Type: application/json", "--data", "@/config/register-connector.json", "http://kafka-connect:8083/connectors"]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        curl -i -X DELETE http://kafka-connect:8083/connectors/event-connector || true
+        sleep 2
+        curl -i -X POST -H 'Content-Type: application/json' --data @/config/register-connector.json http://kafka-connect:8083/connectors
 
 volumes:
   postgres_data:

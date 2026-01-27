@@ -45,10 +45,31 @@ curl -X POST http://localhost:8080/api/events \
   -H "Content-Type: application/json" \
   -d '{"name": "test-event"}'
 
-# Consume from output topic
+# Create an animal
+curl -X POST http://localhost:8080/api/animals \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Buddy", "breed": "Golden Retriever"}'
+
+# Consume from output topics
 docker exec -it kafka kafka-console-consumer \
   --bootstrap-server localhost:9092 \
   --topic event-details \
+  --from-beginning
+
+docker exec -it kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic animal-details \
+  --from-beginning
+
+# Consume from DLQ topics
+docker exec -it kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic event-transformer-dlq \
+  --from-beginning
+
+docker exec -it kafka kafka-console-consumer \
+  --bootstrap-server localhost:9092 \
+  --topic animal-transformer-dlq \
   --from-beginning
 ```
 
@@ -57,25 +78,39 @@ docker exec -it kafka kafka-console-consumer \
 This is a CDC (Change Data Capture) pipeline using Debezium and Kafka Streams:
 
 ```
-[PostgreSQL] --> [Debezium CDC] --> [Kafka: dbserver1.public.event]
-                                           |
-                                           v
-                                    [Transformer App]
-                                           | (REST call to app)
-                                           v
-                                    [Kafka: event-details]
+                              ┌─► [Kafka: dbserver1.public.event] ─► [eventTransform] ─► [Kafka: event-details]
+[PostgreSQL] ─► [Debezium CDC]│                                          │ (on failure)
+                              │                                          └─► [Kafka: event-transformer-dlq]
+                              └─► [Kafka: dbserver1.public.animal] ─► [animalTransform] ─► [Kafka: animal-details]
+                                                                          │ (on failure)
+                                                                          └─► [Kafka: animal-transformer-dlq]
+
+[Kafka: animal-transformer-dlq] ─► [AnimalDlqTransformerStream] ─► [Kafka: animal-details]
+                                    (started via JMX)
 ```
 
+**Docker Compose start order:** postgres + zookeeper → kafka → app (Liquibase migrations) → kafka-connect → register-connector → transformer
+
 **Modules:**
-- `app`: Spring Boot REST API with Event entity (port 8080). Manages Event CRUD operations and serves as the source of truth. Uses Liquibase for schema migrations.
-- `transformer`: Kafka Streams application (port 8081). Consumes CDC events from Debezium topic, fetches full event details via REST, and produces enriched events to output topic.
+- `app`: Spring Boot REST API with Event and Animal entities (port 8080). Manages CRUD operations and serves as the source of truth. Uses Liquibase for schema migrations.
+- `transformer`: Spring Cloud Stream Kafka Streams application (port 8081). Contains `eventTransform` and `animalTransform` functional beans for CDC topics with per-stream DLQ support, plus a JMX-controlled `AnimalDlqTransformerStream` for reprocessing from `animal-transformer-dlq`.
 - `integration-tests`: End-to-end tests using Testcontainers. Spins up entire infrastructure and verifies the CDC pipeline.
 
 **Key Topics:**
 - `dbserver1.public.event`: Debezium CDC events (input)
+- `dbserver1.public.animal`: Debezium CDC animal events (input)
 - `event-details`: Enriched event data (output)
+- `animal-details`: Enriched animal data (output)
+- `event-transformer-dlq`: Dead letter queue for failed event enrichments (Kafka Streams level)
+- `animal-transformer-dlq`: Dead letter queue for failed animal enrichments (Kafka Streams level)
 
-**Tech Stack:** Java 21, Spring Boot 3.4.x, PostgreSQL 16, Kafka/Zookeeper (Confluent 7.5), Debezium 2.4
+**DLQ Handling:**
+
+DLQ is handled at the Kafka Streams level via Spring Cloud Stream's `enableDlq` consumer config. When enrichment fails (exception thrown), the original CDC payload is sent to the per-stream DLQ topic (`event-transformer-dlq` or `animal-transformer-dlq`). The `AnimalDlqTransformerStream` reads from `animal-transformer-dlq` and can be started/stopped via JMX (`startDlqStream` / `stopDlqStream`).
+
+**Debezium Connector:** `event-connector` captures `public.event` and `public.animal` tables.
+
+**Tech Stack:** Java 21, Spring Boot 3.4.x, Spring Cloud Stream (Kafka Streams binder), PostgreSQL 16, Kafka/Zookeeper (Confluent 7.5), Debezium 2.4
 
 ## Transformer Runtime Configuration
 

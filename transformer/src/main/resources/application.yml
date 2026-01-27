@@ -2,39 +2,42 @@ server:
   port: 8081
 
 spring:
-  kafka:
-    bootstrap-servers: kafka:9092
-    streams:
-      application-id: event-transformer
-
-      # Threading - set to number of input topic partitions for max parallelism
-      num-stream-threads: 1
-
-      # Batching & Latency
-      commit-interval-ms: 1000       # Offset commit frequency (ms)
-      state-store-cache-max-size: 10485760
-      poll-ms: 100                   # Max poll blocking time (ms)
-
-      # Consumer tuning
-      max-poll-records: 1000         # Max records per poll
-      fetch-max-bytes: 52428800      # Max fetch size (50MB)
-      fetch-max-wait-ms: 500         # Max broker wait time (ms)
-
-      # Producer tuning
-      batch-size: 16384              # Producer batch size (16KB)
-      linger-ms: 100                 # Batch fill wait time (ms)
-      buffer-memory: 33554432        # Producer buffer (32MB)
-      compression-type: none         # none, gzip, snappy, lz4, zstd
-
-      # Reliability
-      processing-guarantee: at_least_once  # at_least_once, exactly_once, exactly_once_v2
-      replication-factor: 1          # Internal topic replication (use 3 in prod)
+  cloud:
+    function:
+      definition: eventTransform;animalTransform
+    stream:
+      kafka:
+        streams:
+          binder:
+            brokers: kafka:9092
+            configuration:
+              default.key.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+              default.value.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+            auto-add-partitions: false
+            auto-alter-topics: false
+          bindings:
+            eventTransform-in-0:
+              consumer:
+                application-id: event-transformer
+                enable-dlq: true
+                dlq-name: event-transformer-dlq
+                dlq-partitions: 1
+            animalTransform-in-0:
+              consumer:
+                application-id: animal-transformer
+                enable-dlq: true
+                dlq-name: animal-transformer-dlq
+                dlq-partitions: 1
+      bindings:
+        eventTransform-in-0:
+          destination: dbserver1.public.event
+        eventTransform-out-0:
+          destination: event-details
+        animalTransform-in-0:
+          destination: dbserver1.public.animal
+        animalTransform-out-0:
+          destination: animal-details
 
 app:
   service:
     url: http://app:8080
-  topics:
-    input: dbserver1.public.event
-    output: event-details
-    animal-input: dbserver1.public.animal
-    animal-output: animal-details

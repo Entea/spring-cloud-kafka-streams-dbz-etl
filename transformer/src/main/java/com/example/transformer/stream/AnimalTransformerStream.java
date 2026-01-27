@@ -2,19 +2,17 @@ package com.example.transformer.stream;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.kafka.common.serialization.Serdes;
-import org.apache.kafka.streams.StreamsBuilder;
-import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KStream;
-import org.apache.kafka.streams.kstream.Produced;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
-import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.web.client.RestTemplate;
 
-@Component
+import java.util.function.Function;
+
+@Configuration
 public class AnimalTransformerStream {
 
     private static final Logger logger = LoggerFactory.getLogger(AnimalTransformerStream.class);
@@ -25,27 +23,12 @@ public class AnimalTransformerStream {
     @Value("${app.service.url}")
     private String appServiceUrl;
 
-    @Value("${app.topics.animal-input}")
-    private String inputTopic;
-
-    @Value("${app.topics.animal-output}")
-    private String outputTopic;
-
     @Bean
-    public KStream<String, String> animalStream(StreamsBuilder streamsBuilder) {
-        KStream<String, String> stream = streamsBuilder.stream(
-                inputTopic,
-                Consumed.with(Serdes.String(), Serdes.String())
-        );
-
-        KStream<String, String> transformedStream = stream
+    public Function<KStream<String, String>, KStream<String, String>> animalTransform() {
+        return stream -> stream
                 .filter((key, value) -> value != null)
                 .mapValues(this::extractAndEnrichAnimal)
                 .filter((key, value) -> value != null);
-
-        transformedStream.to(outputTopic, Produced.with(Serdes.String(), Serdes.String()));
-
-        return transformedStream;
     }
 
     private String extractAndEnrichAnimal(String cdcPayload) {
@@ -75,17 +58,12 @@ public class AnimalTransformerStream {
             return animalDetails;
         } catch (Exception e) {
             logger.error("Error processing CDC payload: {}", e.getMessage(), e);
-            return null;
+            throw new RuntimeException("Failed to process CDC payload", e);
         }
     }
 
     private String fetchAnimalFromApp(Long animalId) {
-        try {
-            String url = appServiceUrl + "/api/animals/" + animalId;
-            return restTemplate.getForObject(url, String.class);
-        } catch (Exception e) {
-            logger.error("Failed to fetch animal {} from app service: {}", animalId, e.getMessage());
-            return null;
-        }
+        String url = appServiceUrl + "/api/animals/" + animalId;
+        return restTemplate.getForObject(url, String.class);
     }
 }
