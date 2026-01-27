@@ -4,7 +4,7 @@ server:
 spring:
   cloud:
     function:
-      definition: eventTransform;animalTransform
+      definition: eventTransform;animalTransform;animalDlqTransform
     stream:
       kafka:
         streams:
@@ -28,6 +28,11 @@ spring:
                 enable-dlq: true
                 dlq-name: animal-transformer-dlq
                 dlq-partitions: 1
+            animalDlqTransform-in-0:
+              consumer:
+                application-id: animal-dlq-transformer
+                configuration:
+                  max.poll.records: 10
       bindings:
         eventTransform-in-0:
           destination: dbserver1.public.event
@@ -37,6 +42,14 @@ spring:
           destination: dbserver1.public.animal
         animalTransform-out-0:
           destination: animal-details
+        animalDlqTransform-in-0:
+          destination: animal-transformer-dlq
+          consumer:
+            auto-startup: false
+        animalDlqTransform-out-0:
+          destination: animal-details
+          producer:
+            auto-startup: false
 
 app:
   service:

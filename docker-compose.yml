@@ -21,9 +21,6 @@ services:
     depends_on:
       zookeeper:
         condition: service_healthy
-    ports:
-      - "19092:9092"
-#      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -44,8 +41,6 @@ services:
     image: postgres:16
     hostname: postgres
     container_name: postgres
-#    ports:
-#      - "5432:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
