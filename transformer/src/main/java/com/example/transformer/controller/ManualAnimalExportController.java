@@ -1,6 +1,9 @@
 package com.example.transformer.controller;
 
-import com.example.transformer.service.AnimalEnrichmentService;
+import com.example.transformer.avro.AnimalDetails;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.confluent.kafka.serializers.KafkaAvroSerializer;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -15,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import jakarta.annotation.PreDestroy;
+import java.util.HashMap;
 import java.util.Map;
 
 @RestController
@@ -25,33 +29,47 @@ public class ManualAnimalExportController {
 
     private static final String OUTPUT_TOPIC = "animal-details";
 
-    private final AnimalEnrichmentService enrichmentService;
-    private final KafkaProducer<String, String> producer;
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final KafkaProducer<String, AnimalDetails> producer;
 
     public ManualAnimalExportController(
-            AnimalEnrichmentService enrichmentService,
-            @Value("${spring.cloud.stream.kafka.streams.binder.brokers}") String brokers) {
-        this.enrichmentService = enrichmentService;
-        this.producer = new KafkaProducer<>(Map.of(
-                ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers,
-                ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class,
-                ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class
-        ));
+            @Value("${spring.cloud.stream.kafka.streams.binder.brokers}") String brokers,
+            @Value("${spring.cloud.stream.kafka.streams.binder.configuration.schema.registry.url}") String schemaRegistryUrl) {
+        Map<String, Object> config = new HashMap<>();
+        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, brokers);
+        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, KafkaAvroSerializer.class);
+        config.put("schema.registry.url", schemaRegistryUrl);
+        this.producer = new KafkaProducer<>(config);
     }
 
     @PostMapping
-    public ResponseEntity<String> export(@RequestBody String cdcPayload) {
+    public ResponseEntity<String> export(@RequestBody String jsonPayload) {
         logger.info("Manual animal export requested");
 
-        String enriched = enrichmentService.extractAndEnrich(cdcPayload);
-        if (enriched == null) {
-            return ResponseEntity.unprocessableEntity().body("Could not enrich payload");
-        }
+        try {
+            JsonNode node = objectMapper.readTree(jsonPayload);
 
-        producer.send(new ProducerRecord<>(OUTPUT_TOPIC, enriched));
-        producer.flush();
-        logger.info("Manual animal export sent to {}", OUTPUT_TOPIC);
-        return ResponseEntity.ok(enriched);
+            JsonNode after = node.path("after");
+            if (after.isMissingNode() || after.isNull()) {
+                after = node;
+            }
+
+            AnimalDetails enriched = AnimalDetails.newBuilder()
+                    .setId(after.path("id").asLong())
+                    .setVersion(after.path("version").asLong())
+                    .setName(after.path("name").asText(""))
+                    .setBreed(after.path("breed").asText(""))
+                    .build();
+
+            producer.send(new ProducerRecord<>(OUTPUT_TOPIC, enriched));
+            producer.flush();
+            logger.info("Manual animal export sent to {}", OUTPUT_TOPIC);
+            return ResponseEntity.ok(enriched.toString());
+        } catch (Exception e) {
+            logger.error("Failed to process manual export: {}", e.getMessage(), e);
+            return ResponseEntity.unprocessableEntity().body("Could not enrich payload: " + e.getMessage());
+        }
     }
 
     @PreDestroy

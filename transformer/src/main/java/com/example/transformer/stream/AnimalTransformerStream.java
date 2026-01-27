@@ -1,6 +1,8 @@
 package com.example.transformer.stream;
 
+import com.example.transformer.avro.AnimalDetails;
 import com.example.transformer.service.AnimalEnrichmentService;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.streams.kstream.KStream;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -17,7 +19,7 @@ public class AnimalTransformerStream {
     }
 
     @Bean
-    public Function<KStream<String, String>, KStream<String, String>> animalTransform() {
+    public Function<KStream<String, GenericRecord>, KStream<String, AnimalDetails>> animalTransform() {
         return stream -> stream
                 .filter((key, value) -> value != null)
                 .mapValues(enrichmentService::extractAndEnrich)

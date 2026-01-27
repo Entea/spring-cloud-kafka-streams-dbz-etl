@@ -35,6 +35,9 @@ curl -X POST -H "Content-Type: application/json" \
 
 # Check connector status
 curl http://localhost:8083/connectors/event-connector/status
+
+# Check Schema Registry subjects
+curl http://localhost:8086/subjects
 ```
 
 ## Testing the Pipeline
@@ -89,7 +92,7 @@ This is a CDC (Change Data Capture) pipeline using Debezium and Kafka Streams:
                                     (started via JMX)
 ```
 
-**Docker Compose start order:** postgres + zookeeper → kafka → app (Liquibase migrations) → kafka-connect → register-connector → transformer
+**Docker Compose start order:** postgres + zookeeper → kafka → schema-registry → app (Liquibase migrations) → kafka-connect → register-connector → transformer
 
 **Modules:**
 - `app`: Spring Boot REST API with Event and Animal entities (port 8080). Manages CRUD operations and serves as the source of truth. Uses Liquibase for schema migrations.
@@ -110,7 +113,9 @@ DLQ is handled at the Kafka Streams level via Spring Cloud Stream's `enableDlq` 
 
 **Debezium Connector:** `event-connector` captures `public.event` and `public.animal` tables.
 
-**Tech Stack:** Java 21, Spring Boot 3.4.x, Spring Cloud Stream (Kafka Streams binder), PostgreSQL 16, Kafka/Zookeeper (Confluent 7.5), Debezium 2.4
+**Serialization:** All CDC topics and output topics use Avro serialization via Confluent Schema Registry. Debezium produces Avro envelopes (with `before`/`after` fields) to CDC topics. The transformer consumes these as `GenericRecord`, enriches via REST API, and produces generated Avro `SpecificRecord` types (`EventDetails`, `AnimalDetails`) to output topics. Avro schemas are in `avro/` directory. Schema Registry available at port 8086.
+
+**Tech Stack:** Java 21, Spring Boot 3.4.x, Spring Cloud Stream (Kafka Streams binder), PostgreSQL 16, Kafka/Zookeeper (Confluent 7.5), Debezium 2.4, Confluent Schema Registry 7.5, Avro
 
 ## Transformer Runtime Configuration
 

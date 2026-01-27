@@ -1,6 +1,8 @@
 package com.example.transformer.stream;
 
+import com.example.transformer.avro.AnimalDetails;
 import com.example.transformer.service.AnimalEnrichmentService;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.streams.kstream.KStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,7 +27,7 @@ public class AnimalDlqTransformerStream {
     }
 
     @Bean
-    public Function<KStream<String, String>, KStream<String, String>> animalDlqTransform() {
+    public Function<KStream<String, GenericRecord>, KStream<String, AnimalDetails>> animalDlqTransform() {
         return stream -> stream
                 .filter((key, value) -> value != null)
                 .mapValues(enrichmentService::extractAndEnrich)

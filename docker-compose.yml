@@ -57,8 +57,28 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.5.0
+    hostname: schema-registry
+    container_name: schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8086:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: kafka:9092
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/subjects"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   kafka-connect:
-    image: debezium/connect:2.4
+    build:
+      context: docker/connect
+      dockerfile: Dockerfile
     hostname: kafka-connect
     container_name: kafka-connect
     depends_on:
@@ -67,6 +87,8 @@ services:
       postgres:
         condition: service_healthy
       app:
+        condition: service_healthy
+      schema-registry:
         condition: service_healthy
     ports:
       - "8084:8083"
@@ -80,9 +102,9 @@ services:
       OFFSET_STORAGE_REPLICATION_FACTOR: 1
       STATUS_STORAGE_REPLICATION_FACTOR: 1
       KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
-      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
       KEY_CONVERTER_SCHEMAS_ENABLE: "false"
-      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
       interval: 10s
@@ -117,6 +139,8 @@ services:
         condition: service_healthy
       app:
         condition: service_healthy
+      schema-registry:
+        condition: service_healthy
       register-connector:
         condition: service_completed_successfully
     ports:
@@ -124,6 +148,7 @@ services:
     environment:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       APP_SERVICE_URL: http://app:8080
+      SPRING_CLOUD_STREAM_KAFKA_STREAMS_BINDER_CONFIGURATION_SCHEMA_REGISTRY_URL: http://schema-registry:8081
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -141,6 +166,7 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: debezium
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
 
   register-connector:
     image: curlimages/curl:latest

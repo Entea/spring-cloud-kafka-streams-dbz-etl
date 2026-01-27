@@ -1,7 +1,9 @@
 package com.example.transformer.service;
 
+import com.example.transformer.avro.AnimalDetails;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.avro.generic.GenericRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,35 +21,48 @@ public class AnimalEnrichmentService {
     @Value("${app.service.url}")
     private String appServiceUrl;
 
-    public String extractAndEnrich(String cdcPayload) {
-        logger.info("Got payload {}", cdcPayload);
-        JsonNode root;
-        try {
-            root = objectMapper.readTree(cdcPayload);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to parse CDC payload", e);
-        }
+    public AnimalDetails extractAndEnrich(GenericRecord envelope) {
+        logger.info("Got Debezium Avro envelope for animal");
 
-        JsonNode after = root.path("after");
-        if (after.isMissingNode() || after.isNull()) {
+        Object afterObj = envelope.get("after");
+        if (afterObj == null) {
             logger.warn("No 'after' field in CDC payload, skipping delete event");
             return null;
         }
 
-        Long animalId = after.path("id").asLong();
+        GenericRecord after = (GenericRecord) afterObj;
+        Object idObj = after.get("id");
+        if (idObj == null) {
+            logger.warn("Could not find 'id' field in after record");
+            return null;
+        }
+
+        long animalId = ((Number) idObj).longValue();
         if (animalId == 0) {
             logger.warn("Could not extract animal ID from CDC payload");
             return null;
         }
 
         logger.info("Fetching animal details for ID: {}", animalId);
-        String animalDetails = fetchAnimalFromApp(animalId);
-
-        if (animalDetails != null) {
-            logger.info("Successfully enriched animal ID: {}", animalId);
+        String animalJson = fetchAnimalFromApp(animalId);
+        if (animalJson == null) {
+            return null;
         }
 
-        return animalDetails;
+        try {
+            JsonNode node = objectMapper.readTree(animalJson);
+            AnimalDetails enriched = AnimalDetails.newBuilder()
+                    .setId(node.path("id").asLong())
+                    .setVersion(node.path("version").asLong())
+                    .setName(node.path("name").asText(""))
+                    .setBreed(node.path("breed").asText(""))
+                    .build();
+
+            logger.info("Successfully enriched animal ID: {}", animalId);
+            return enriched;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to build enriched animal", e);
+        }
     }
 
     public String fetchAnimalFromApp(Long animalId) {
