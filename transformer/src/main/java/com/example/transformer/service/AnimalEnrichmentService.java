@@ -21,7 +21,18 @@ public class AnimalEnrichmentService {
     @Value("${app.service.url}")
     private String appServiceUrl;
 
+    @Value("${app.repair.service.url:http://app:8080}")
+    private String appRepairServiceUrl;
+
     public AnimalDetails extractAndEnrich(GenericRecord envelope) {
+        return extractAndEnrichInternal(envelope, appServiceUrl);
+    }
+
+    public AnimalDetails repairAnimalDetails(GenericRecord envelope) {
+        return extractAndEnrichInternal(envelope, appRepairServiceUrl);
+    }
+
+    private AnimalDetails extractAndEnrichInternal(GenericRecord envelope, String serviceUrl) {
         logger.info("Got Debezium Avro envelope for animal");
 
         Object afterObj = envelope.get("after");
@@ -44,7 +55,7 @@ public class AnimalEnrichmentService {
         }
 
         logger.info("Fetching animal details for ID: {}", animalId);
-        String animalJson = fetchAnimalFromApp(animalId);
+        String animalJson = fetchAnimalFromApp(animalId, serviceUrl);
         if (animalJson == null) {
             return null;
         }
@@ -65,8 +76,16 @@ public class AnimalEnrichmentService {
         }
     }
 
-    public String fetchAnimalFromApp(Long animalId) {
-        String url = appServiceUrl + "/api/animals/" + animalId;
+    public String fetchAnimalFromApp(Long animalId, String serviceUrl) {
+        String url = serviceUrl + "/api/animals/" + animalId;
         return restTemplate.getForObject(url, String.class);
+    }
+
+    /**
+     * Deprecated: Use fetchAnimalFromApp(Long, String) instead.
+     * Kept for backward compatibility if needed, using main service URL.
+     */
+    public String fetchAnimalFromApp(Long animalId) {
+        return fetchAnimalFromApp(animalId, appServiceUrl);
     }
 }

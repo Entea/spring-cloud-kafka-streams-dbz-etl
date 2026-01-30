@@ -1,6 +1,5 @@
 package com.example.integration;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.confluent.kafka.serializers.KafkaAvroDeserializer;
 import io.confluent.kafka.serializers.KafkaAvroDeserializerConfig;
@@ -28,26 +27,26 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.List;
 import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 
-public class CdcPipelineIT {
+public class DlqPipelineIT {
 
-    private static final Logger log = LoggerFactory.getLogger(CdcPipelineIT.class);
+    private static final Logger log = LoggerFactory.getLogger(DlqPipelineIT.class);
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final HttpClient httpClient = HttpClient.newHttpClient();
 
-    private static final String EVENT_DETAILS_TOPIC = "event-details";
+    private static final String ANIMAL_DETAILS_TOPIC = "animal-details";
+    private static final String DLQ_TOPIC = "animal-transformer-dlq";
 
-    private static final int KAFKA_INTERNAL_PORT = 9092;
+    private static final int KAFKA_INTERNAL_PORT = 9092;  // Used by containers in the same network
     private static final int SCHEMA_REGISTRY_INTERNAL_PORT = 8081;
     private static final int KAFKA_CONNECT_PORT = 8083;
+
     private static final int KAFKA_EXTERNAL_PORT = 29092;
 
     private static Network network;
@@ -63,7 +62,6 @@ public class CdcPipelineIT {
     static void startContainers() throws Exception {
         network = Network.newNetwork();
 
-        // Start PostgreSQL
         postgres = new PostgreSQLContainer<>(DockerImageName.parse("postgres:16"))
                 .withNetwork(network)
                 .withNetworkAliases("postgres")
@@ -132,7 +130,7 @@ public class CdcPipelineIT {
                 .withNetworkAliases("schema-registry")
                 .withExposedPorts(SCHEMA_REGISTRY_INTERNAL_PORT)
                 .withEnv("SCHEMA_REGISTRY_HOST_NAME", "schema-registry")
-                .withEnv("SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", "kafka:" + KAFKA_INTERNAL_PORT)
+                .withEnv("SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", "kafka:" + KAFKA_INTERNAL_PORT)  // KafkaContainer exposes BROKER listener on port 9092
                 .waitingFor(Wait.forHttp("/subjects").forPort(SCHEMA_REGISTRY_INTERNAL_PORT).withStartupTimeout(Duration.ofMinutes(2)));
         schemaRegistry.start();
         log.info("Schema Registry started");
@@ -155,6 +153,7 @@ public class CdcPipelineIT {
                 .withEnv("KEY_CONVERTER_SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
                 .withEnv("VALUE_CONVERTER", "io.confluent.connect.avro.AvroConverter")
                 .withEnv("VALUE_CONVERTER_SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
+                // AvroConverter needs schema.registry.url - try different naming patterns
                 .withEnv("SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
                 .withEnv("CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
                 .withEnv("CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
@@ -174,7 +173,7 @@ public class CdcPipelineIT {
                 .withEnv("SPRING_DATASOURCE_URL", "jdbc:postgresql://postgres:5432/eventdb")
                 .withEnv("SPRING_DATASOURCE_USERNAME", "postgres")
                 .withEnv("SPRING_DATASOURCE_PASSWORD", "postgres")
-                .waitingFor(Wait.forHttp("/api/events").forPort(8080).withStartupTimeout(Duration.ofMinutes(2)));
+                .waitingFor(Wait.forHttp("/api/animals").forPort(8080).withStartupTimeout(Duration.ofMinutes(2)));
         app.start();
         log.info("App started");
 
@@ -189,7 +188,8 @@ public class CdcPipelineIT {
                 .withExposedPorts(8081)
                 .withEnv("SPRING_KAFKA_BOOTSTRAP_SERVERS", "kafka:" + KAFKA_INTERNAL_PORT)
                 .withEnv("SPRING_CLOUD_STREAM_KAFKA_STREAMS_BINDER_CONFIGURATION_SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
-                .withEnv("APP_SERVICE_URL", "http://app:8080")
+                .withEnv("APP_SERVICE_URL", "http://app:9999") // Broken URL
+                .withEnv("APP_REPAIR_SERVICE_URL", "http://app:8080") // Correct URL
                 .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofMinutes(2)));
         transformer.start();
         log.info("Transformer started");
@@ -224,106 +224,168 @@ public class CdcPipelineIT {
         log.info("Containers stopped");
     }
 
+    private static final String CDC_TOPIC = "dbserver1.public.animal";
+
     @Test
-    void testCreateAndUpdateEventAppearsInKafkaTopic() throws Exception {
-        List<GenericRecord> receivedEvents = Collections.synchronizedList(new ArrayList<>());
+    void testAnimalDlqProcessing() throws Exception {
+        log.info("PHASE 1: Triggering DLQ...");
+        long failedAnimalId = createAnimal("FailDog", "Unknown");
 
-        try (KafkaConsumer<GenericRecord, GenericRecord> consumer = createAvroConsumer()) {
-            consumer.subscribe(Collections.singletonList(EVENT_DETAILS_TOPIC));
-
-            // Start consuming in a background thread
-            Thread consumerThread = new Thread(() -> {
-                while (!Thread.currentThread().isInterrupted()) {
-                    ConsumerRecords<GenericRecord, GenericRecord> records = consumer.poll(Duration.ofMillis(100));
-                    for (ConsumerRecord<GenericRecord, GenericRecord> record : records) {
-                        try {
-                            log.info("Received event: {}", record.value());
-                            receivedEvents.add(record.value());
-                        } catch (Exception e) {
-                            log.error("Failed to process event", e);
+        // First, verify CDC topic received the message
+        log.info("Checking CDC topic {} for animal {}", CDC_TOPIC, failedAnimalId);
+        try (KafkaConsumer<GenericRecord, GenericRecord> cdcConsumer = createAvroConsumer(CDC_TOPIC)) {
+            await().atMost(60, TimeUnit.SECONDS).pollInterval(2, TimeUnit.SECONDS).until(() -> {
+                ConsumerRecords<GenericRecord, GenericRecord> records = cdcConsumer.poll(Duration.ofMillis(1000));
+                log.info("CDC topic poll returned {} records", records.count());
+                for (ConsumerRecord<GenericRecord, GenericRecord> record : records) {
+                    log.info("CDC record key: {}, value schema: {}", record.key(),
+                            record.value() != null ? record.value().getSchema().getName() : "null");
+                    if (record.value() != null && record.value().get("after") instanceof GenericRecord after) {
+                        long id = ((Number) after.get("id")).longValue();
+                        log.info("Found CDC record for animal ID: {}", id);
+                        if (id == failedAnimalId) {
+                            return true;
                         }
                     }
                 }
+                return false;
             });
-            consumerThread.start();
+        }
+        log.info("CDC message confirmed for animal {}", failedAnimalId);
 
-            // Create an event via REST API
-            String appUrl = getAppUrl();
-            log.info("Creating event via REST API at {}", appUrl);
-
-            JsonNode createdEvent = createEvent(appUrl, "test-event-1");
-            assertNotNull(createdEvent);
-            long eventId = createdEvent.get("id").asLong();
-            log.info("Created event with ID: {}", eventId);
-
-            // Wait for the created event to appear in Kafka
-            await().atMost(30, TimeUnit.SECONDS)
-                    .pollInterval(1, TimeUnit.SECONDS)
-                    .until(() -> receivedEvents.stream()
-                            .anyMatch(e -> ((Number) e.get("id")).longValue() == eventId
-                                    && "test-event-1".equals(e.get("name").toString())));
-
-            log.info("Create event appeared in Kafka topic");
-
-            // Update the event via REST API
-            JsonNode updatedEvent = updateEvent(appUrl, eventId, "test-event-1-updated");
-            assertNotNull(updatedEvent);
-            assertEquals("test-event-1-updated", updatedEvent.get("name").asText());
-            log.info("Updated event: {}", updatedEvent);
-
-            // Wait for the updated event to appear in Kafka
-            await().atMost(30, TimeUnit.SECONDS)
-                    .pollInterval(1, TimeUnit.SECONDS)
-                    .until(() -> receivedEvents.stream()
-                            .anyMatch(e -> ((Number) e.get("id")).longValue() == eventId
-                                    && "test-event-1-updated".equals(e.get("name").toString())));
-
-            log.info("Update event appeared in Kafka topic");
-
-            // Stop consumer thread
-            consumerThread.interrupt();
-            consumerThread.join(5000);
+        // Check what topics exist now
+        try {
+            var result = kafka.execInContainer("kafka-topics", "--bootstrap-server", "localhost:9092", "--list");
+            log.info("Topics after CDC: {}", result.getStdout());
+        } catch (Exception e) {
+            log.warn("Could not list topics", e);
         }
 
-        // Verify we received both events
-        assertTrue(receivedEvents.stream()
-                        .anyMatch(e -> "test-event-1".equals(e.get("name").toString())),
-                "Should have received the created event");
-        assertTrue(receivedEvents.stream()
-                        .anyMatch(e -> "test-event-1-updated".equals(e.get("name").toString())),
-                "Should have received the updated event");
+        // Also check animal-details topic to see if messages went there instead
+        log.info("Checking animal-details topic for any messages");
+        try (KafkaConsumer<GenericRecord, GenericRecord> detailsConsumer = createAvroConsumer(ANIMAL_DETAILS_TOPIC)) {
+            ConsumerRecords<GenericRecord, GenericRecord> detailsRecords = detailsConsumer.poll(Duration.ofSeconds(5));
+            log.info("animal-details topic has {} records", detailsRecords.count());
+            for (ConsumerRecord<GenericRecord, GenericRecord> record : detailsRecords) {
+                log.info("animal-details record: {}", record.value());
+            }
+        }
 
-        log.info("Test completed successfully! Received {} events total", receivedEvents.size());
+        // Print transformer container logs for debugging
+        log.info("Transformer container logs (last 50 lines):");
+        String logs = transformer.getLogs();
+        String[] logLines = logs.split("\n");
+        int startIdx = Math.max(0, logLines.length - 50);
+        for (int i = startIdx; i < logLines.length; i++) {
+            log.info("  TRANSFORMER: {}", logLines[i]);
+        }
+
+        // Now check DLQ topic
+        log.info("Checking DLQ topic {} for animal {}", DLQ_TOPIC, failedAnimalId);
+        try (KafkaConsumer<GenericRecord, GenericRecord> consumer = createAvroConsumer(DLQ_TOPIC)) {
+            await().atMost(60, TimeUnit.SECONDS).pollInterval(2, TimeUnit.SECONDS).until(() -> {
+                ConsumerRecords<GenericRecord, GenericRecord> records = consumer.poll(Duration.ofMillis(1000));
+                log.info("DLQ topic poll returned {} records", records.count());
+                for (ConsumerRecord<GenericRecord, GenericRecord> record : records) {
+                    log.info("DLQ record: key={}, value schema={}", record.key(),
+                            record.value() != null ? record.value().getSchema().getName() : "null");
+                    if (isMatchingRecord(record, failedAnimalId)) {
+                        log.info("Verified message for animal {} in DLQ topic.", failedAnimalId);
+                        return true;
+                    }
+                }
+                return false;
+            });
+        }
+        log.info("DLQ message confirmed for animal {}", failedAnimalId);
+
+        try (KafkaConsumer<GenericRecord, GenericRecord> consumer = createAvroConsumer(ANIMAL_DETAILS_TOPIC)) {
+            ConsumerRecords<GenericRecord, GenericRecord> records = consumer.poll(Duration.ofSeconds(5));
+            for (ConsumerRecord<GenericRecord, GenericRecord> record : records) {
+                if (isMatchingRecord(record, failedAnimalId)) {
+                    fail("Message for animal " + failedAnimalId + " should not be in final topic yet.");
+                }
+            }
+            log.info("Verified message for animal {} is NOT in final topic.", failedAnimalId);
+        }
+
+        log.info("PHASE 2: Starting DLQ reprocessing...");
+        controlDlqStream("start");
+
+        try (KafkaConsumer<GenericRecord, GenericRecord> consumer = createAvroConsumer(ANIMAL_DETAILS_TOPIC)) {
+            await().atMost(30, TimeUnit.SECONDS).pollInterval(1, TimeUnit.SECONDS).until(() -> {
+                ConsumerRecords<GenericRecord, GenericRecord> records = consumer.poll(Duration.ofMillis(500));
+                for (ConsumerRecord<GenericRecord, GenericRecord> record : records) {
+                    if (isMatchingRecord(record, failedAnimalId)) {
+                        assertEquals("FailDog", record.value().get("name").toString());
+                        log.info("Verified reprocessed message for animal {} in final topic.", failedAnimalId);
+                        return true;
+                    }
+                }
+                return false;
+            });
+        }
+
+        log.info("PHASE 3: Stopping DLQ stream and verifying...");
+        controlDlqStream("stop");
+        long anotherFailedId = createAnimal("StopTestDog", "Poodle");
+
+        try (KafkaConsumer<GenericRecord, GenericRecord> consumer = createAvroConsumer(DLQ_TOPIC)) {
+            await().atMost(30, TimeUnit.SECONDS).pollInterval(1, TimeUnit.SECONDS).until(() -> {
+                ConsumerRecords<GenericRecord, GenericRecord> records = consumer.poll(Duration.ofMillis(500));
+                for (ConsumerRecord<GenericRecord, GenericRecord> record : records) {
+                    if (isMatchingRecord(record, anotherFailedId)) {
+                        log.info("Verified second message for animal {} in DLQ topic.", anotherFailedId);
+                        return true;
+                    }
+                }
+                return false;
+            });
+        }
+
+        try (KafkaConsumer<GenericRecord, GenericRecord> consumer = createAvroConsumer(ANIMAL_DETAILS_TOPIC)) {
+            ConsumerRecords<GenericRecord, GenericRecord> records = consumer.poll(Duration.ofSeconds(10));
+            for (ConsumerRecord<GenericRecord, GenericRecord> record : records) {
+                if (isMatchingRecord(record, anotherFailedId)) {
+                    fail("Message for " + anotherFailedId + " should not be processed after stopping DLQ stream.");
+                }
+            }
+            log.info("Verified second message for animal {} is NOT in final topic.", anotherFailedId);
+        }
     }
 
-    private static String getKafkaConnectUrl() {
-        return "http://" + kafkaConnect.getHost() + ":" + kafkaConnect.getMappedPort(KAFKA_CONNECT_PORT);
+    private boolean isMatchingRecord(ConsumerRecord<GenericRecord, GenericRecord> record, long expectedId) {
+        GenericRecord key = record.key();
+        GenericRecord value = record.value();
+        // Check if the key is the enriched key from the final topic
+        if (key != null && key.getSchema().getName().equals("RecordKey")) {
+            return ((Number) key.get("id")).longValue() == expectedId;
+        }
+        // Check if the value is the original Debezium message from the DLQ
+        if (value != null && value.get("after") instanceof GenericRecord after) {
+            return ((Number) after.get("id")).longValue() == expectedId;
+        }
+        return false;
     }
 
-    private static String getAppUrl() {
-        return "http://" + app.getHost() + ":" + app.getMappedPort(8080);
-    }
-
-    private static String getSchemaRegistryUrlExternal() {
-        return "http://" + schemaRegistry.getHost() + ":" + schemaRegistry.getMappedPort(SCHEMA_REGISTRY_INTERNAL_PORT);
-    }
-
-    private static String getKafkaBootstrapServersExternal() {
-        return "localhost:" + kafka.getMappedPort(KAFKA_EXTERNAL_PORT);
-    }
+    private static String getKafkaConnectUrl() { return "http://" + kafkaConnect.getHost() + ":" + kafkaConnect.getMappedPort(KAFKA_CONNECT_PORT); }
+    private static String getAppUrl() { return "http://" + app.getHost() + ":" + app.getMappedPort(8080); }
+    private static String getTransformerUrl() { return "http://" + transformer.getHost() + ":" + transformer.getMappedPort(8081); }
+    private static String getSchemaRegistryUrlExternal() { return "http://" + schemaRegistry.getHost() + ":" + schemaRegistry.getMappedPort(SCHEMA_REGISTRY_INTERNAL_PORT); }
+    private static String getKafkaBootstrapServersExternal() { return "localhost:" + kafka.getMappedPort(KAFKA_EXTERNAL_PORT); }
 
     private static void registerDebeziumConnector() throws Exception {
-        postgres.execInContainer("psql", "-U", "postgres", "-d", "eventdb", "-c", "CREATE PUBLICATION event_publication FOR TABLE public.event;");
+        postgres.execInContainer("psql", "-U", "postgres", "-d", "eventdb", "-c", "CREATE PUBLICATION animal_publication FOR TABLE public.animal;");
 
         String connectorConfig = String.format("""
                 {
-                  "name": "event-connector",
-                  "config": {
-                    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-                    "database.hostname": "postgres", "database.port": "5432", "database.user": "postgres",
-                    "database.password": "postgres", "database.dbname": "eventdb",
-                    "topic.prefix": "dbserver1", "table.include.list": "public.event",
-                    "plugin.name": "pgoutput", "slot.name": "event_slot", "publication.name": "event_publication"
+                  \"name\": \"animal-connector\",
+                  \"config\": {
+                    \"connector.class\": \"io.debezium.connector.postgresql.PostgresConnector\",
+                    \"database.hostname\": \"postgres\", \"database.port\": \"5432\", \"database.user\": \"postgres\",
+                    \"database.password\": \"postgres\", \"database.dbname\": \"eventdb\",
+                    \"topic.prefix\": \"dbserver1\", \"table.include.list\": \"public.animal\",
+                    \"plugin.name\": \"pgoutput\", \"slot.name\": \"animal_slot\", \"publication.name\": \"animal_publication\"
                   }
                 }""");
 
@@ -339,7 +401,7 @@ public class CdcPipelineIT {
         await().atMost(90, TimeUnit.SECONDS).pollInterval(3, TimeUnit.SECONDS).until(() -> {
             try {
                 HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
-                        .uri(URI.create(getKafkaConnectUrl() + "/connectors/event-connector/status")).build(), HttpResponse.BodyHandlers.ofString());
+                        .uri(URI.create(getKafkaConnectUrl() + "/connectors/animal-connector/status")).build(), HttpResponse.BodyHandlers.ofString());
                 if (response.statusCode() == 200) {
                     var status = objectMapper.readTree(response.body());
                     String connectorState = status.path("connector").path("state").asText();
@@ -358,7 +420,7 @@ public class CdcPipelineIT {
         });
     }
 
-    private KafkaConsumer<GenericRecord, GenericRecord> createAvroConsumer() {
+    private KafkaConsumer<GenericRecord, GenericRecord> createAvroConsumer(String topic) {
         Properties props = new Properties();
         props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, getKafkaBootstrapServersExternal());
         props.put(ConsumerConfig.GROUP_ID_CONFIG, "it-consumer-" + System.currentTimeMillis());
@@ -367,32 +429,31 @@ public class CdcPipelineIT {
         props.put(KafkaAvroDeserializerConfig.SCHEMA_REGISTRY_URL_CONFIG, getSchemaRegistryUrlExternal());
         props.put(KafkaAvroDeserializerConfig.SPECIFIC_AVRO_READER_CONFIG, "false");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        return new KafkaConsumer<>(props);
+
+        KafkaConsumer<GenericRecord, GenericRecord> consumer = new KafkaConsumer<>(props);
+        consumer.subscribe(Collections.singletonList(topic));
+        return consumer;
     }
 
-    private JsonNode createEvent(String appUrl, String name) throws IOException, InterruptedException {
-        String body = String.format("{\"name\": \"%s\"}", name);
+    private long createAnimal(String name, String breed) throws IOException, InterruptedException {
+        String body = String.format("{\"name\": \"%s\", \"breed\": \"%s\"}", name, breed);
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(appUrl + "/api/events"))
+                .uri(URI.create(getAppUrl() + "/api/animals"))
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-
+                .POST(HttpRequest.BodyPublishers.ofString(body)).build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "Failed to create event: " + response.body());
-        return objectMapper.readTree(response.body());
+        assertEquals(200, response.statusCode());
+        long id = objectMapper.readTree(response.body()).get("id").asLong();
+        log.info("Created animal with ID: {}", id);
+        return id;
     }
 
-    private JsonNode updateEvent(String appUrl, long id, String newName) throws IOException, InterruptedException {
-        String body = String.format("{\"name\": \"%s\"}", newName);
+    private void controlDlqStream(String action) throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(appUrl + "/api/events/" + id))
-                .header("Content-Type", "application/json")
-                .PUT(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-
+                .uri(URI.create(getTransformerUrl() + "/api/dlq/animal/" + action))
+                .POST(HttpRequest.BodyPublishers.noBody()).build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "Failed to update event: " + response.body());
-        return objectMapper.readTree(response.body());
+        assertEquals(200, response.statusCode());
+        log.info("Sent '{}' command to DLQ stream. Response: {}", action, response.body());
     }
 }

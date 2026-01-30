@@ -148,6 +148,7 @@ services:
     environment:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       APP_SERVICE_URL: http://app:8080
+      APP_REPAIR_SERVICE_URL: http://app:8080
       SPRING_CLOUD_STREAM_KAFKA_STREAMS_BINDER_CONFIGURATION_SCHEMA_REGISTRY_URL: http://schema-registry:8081
 
   kafka-ui:

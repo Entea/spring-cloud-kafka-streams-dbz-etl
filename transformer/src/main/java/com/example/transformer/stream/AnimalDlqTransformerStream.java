@@ -31,7 +31,7 @@ public class AnimalDlqTransformerStream {
     public Function<KStream<GenericRecord, GenericRecord>, KStream<RecordKey, AnimalDetails>> animalDlqTransform() {
         return stream -> stream
                 .filter((key, value) -> value != null)
-                .mapValues(enrichmentService::extractAndEnrich)
+                .mapValues(enrichmentService::repairAnimalDetails)
                 .filter((key, value) -> value != null)
                 .selectKey((key, value) -> RecordKey.newBuilder().setId(value.getId()).build());
     }

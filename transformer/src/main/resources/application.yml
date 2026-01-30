@@ -43,6 +43,9 @@ spring:
           destination: dbserver1.public.animal
         animalTransform-out-0:
           destination: animal-details
+        # StreamBridge output for DLQ
+        animalDlq-out-0:
+          destination: animal-transformer-dlq
         animalDlqTransform-in-0:
           destination: animal-transformer-dlq
           consumer:
@@ -55,3 +58,6 @@ spring:
 app:
   service:
     url: http://app:8080
+  repair:
+    service:
+      url: http://app:8080
