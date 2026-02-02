@@ -1,0 +1,5 @@
+services:
+  transformer:
+    environment:
+      APP_SERVICE_URL: http://app:9999  # Broken URL to trigger DLQ
+      APP_REPAIR_SERVICE_URL: http://app:8080  # Working URL for reprocessing

@@ -1,257 +1,58 @@
 package com.example.integration;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.confluent.kafka.serializers.KafkaAvroDeserializer;
-import io.confluent.kafka.serializers.KafkaAvroDeserializerConfig;
+import com.example.integration.utils.HttpTestHelper;
+import com.example.integration.utils.KafkaTestHelper;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.Network;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.containers.wait.strategy.Wait;
-import org.testcontainers.images.builder.ImageFromDockerfile;
-import org.testcontainers.utility.DockerImageName;
 
-import java.io.IOException;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.file.Path;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 
 import static org.awaitility.Awaitility.await;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-public class CdcPipelineIT {
+/**
+ * Integration test for the CDC pipeline using Event entity.
+ * Tests that events created/updated via REST API flow through Debezium CDC
+ * to the event-details Kafka topic.
+ */
+public class CdcPipelineIT extends BaseIntegrationTest {
 
     private static final Logger log = LoggerFactory.getLogger(CdcPipelineIT.class);
-    private static final ObjectMapper objectMapper = new ObjectMapper();
-    private static final HttpClient httpClient = HttpClient.newHttpClient();
 
     private static final String EVENT_DETAILS_TOPIC = "event-details";
 
-    private static final int KAFKA_INTERNAL_PORT = 9092;
-    private static final int SCHEMA_REGISTRY_INTERNAL_PORT = 8081;
-    private static final int KAFKA_CONNECT_PORT = 8083;
-    private static final int KAFKA_EXTERNAL_PORT = 29092;
-
-    private static Network network;
-    private static PostgreSQLContainer<?> postgres;
-    private static GenericContainer<?> zookeeper;
-    private static GenericContainer<?> kafka;
-    private static GenericContainer<?> schemaRegistry;
-    private static GenericContainer<?> kafkaConnect;
-    private static GenericContainer<?> app;
-    private static GenericContainer<?> transformer;
+    private static KafkaTestHelper kafkaHelper;
+    private static HttpTestHelper httpHelper;
 
     @BeforeAll
-    static void startContainers() throws Exception {
-        network = Network.newNetwork();
+    static void setUp() throws Exception {
+        startEnvironment();
 
-        // Start PostgreSQL
-        postgres = new PostgreSQLContainer<>(DockerImageName.parse("postgres:16"))
-                .withNetwork(network)
-                .withNetworkAliases("postgres")
-                .withDatabaseName("eventdb")
-                .withUsername("postgres")
-                .withPassword("postgres")
-                .withCommand("postgres", "-c", "wal_level=logical")
-                .waitingFor(Wait.forListeningPort());
-        postgres.start();
-        log.info("PostgreSQL started");
+        kafkaHelper = new KafkaTestHelper(getKafkaBootstrapServers(), getSchemaRegistryUrl());
+        httpHelper = new HttpTestHelper(getAppUrl(), getTransformerUrl());
 
-        // Start Zookeeper
-        zookeeper = new GenericContainer<>(DockerImageName.parse("confluentinc/cp-zookeeper:7.5.0"))
-                .withNetwork(network)
-                .withNetworkAliases("zookeeper")
-                .withEnv("ZOOKEEPER_CLIENT_PORT", "2181")
-                .withEnv("ZOOKEEPER_TICK_TIME", "2000")
-                .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofMinutes(2)));
-        zookeeper.start();
-        log.info("Zookeeper started");
-
-        // Kafka startup script that waits for the advertised listeners config file
-        String kafkaStartupScript =
-                "echo 'Waiting for kafka_listeners config file...'; " +
-                "while [ ! -f /tmp/kafka_listeners ]; do sleep 0.1; done; " +
-                "export KAFKA_ADVERTISED_LISTENERS=$(cat /tmp/kafka_listeners); " +
-                "echo 'Starting Kafka with KAFKA_ADVERTISED_LISTENERS='$KAFKA_ADVERTISED_LISTENERS; " +
-                "/etc/confluent/docker/run";
-
-        kafka = new GenericContainer<>(DockerImageName.parse("confluentinc/cp-kafka:7.5.0"))
-                .withNetwork(network)
-                .withNetworkAliases("kafka")
-                .withExposedPorts(KAFKA_EXTERNAL_PORT)
-                .withEnv("KAFKA_BROKER_ID", "1")
-                .withEnv("KAFKA_ZOOKEEPER_CONNECT", "zookeeper:2181")
-                .withEnv("KAFKA_LISTENERS", "INTERNAL://0.0.0.0:" + KAFKA_INTERNAL_PORT + ",EXTERNAL://0.0.0.0:" + KAFKA_EXTERNAL_PORT)
-                .withEnv("KAFKA_LISTENER_SECURITY_PROTOCOL_MAP", "INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT")
-                .withEnv("KAFKA_INTER_BROKER_LISTENER_NAME", "INTERNAL")
-                .withEnv("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1")
-                .withEnv("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0")
-                .withEnv("KAFKA_AUTO_CREATE_TOPICS_ENABLE", "true")
-                .withCommand("sh", "-c", kafkaStartupScript)
-                .waitingFor(Wait.forLogMessage(".*Waiting for kafka_listeners.*", 1)
-                        .withStartupTimeout(Duration.ofSeconds(30)));
-        kafka.start();
-
-        // Inject the advertised listeners with the actual mapped port
-        int mappedKafkaPort = kafka.getMappedPort(KAFKA_EXTERNAL_PORT);
-        String advertisedListeners = "INTERNAL://kafka:" + KAFKA_INTERNAL_PORT + ",EXTERNAL://localhost:" + mappedKafkaPort;
-        log.info("Writing Kafka advertised listeners: {}", advertisedListeners);
-        kafka.execInContainer("sh", "-c", "echo '" + advertisedListeners + "' > /tmp/kafka_listeners");
-
-        // Wait for Kafka to be ready
-        await().atMost(120, TimeUnit.SECONDS).pollInterval(2, TimeUnit.SECONDS).until(() -> {
-            try {
-                var result = kafka.execInContainer("kafka-broker-api-versions", "--bootstrap-server", "localhost:" + KAFKA_INTERNAL_PORT);
-                return result.getExitCode() == 0;
-            } catch (Exception e) {
-                return false;
-            }
-        });
-        log.info("Kafka started, external port: {}", mappedKafkaPort);
-
-        schemaRegistry = new GenericContainer<>(DockerImageName.parse("confluentinc/cp-schema-registry:7.5.0"))
-                .withNetwork(network)
-                .withNetworkAliases("schema-registry")
-                .withExposedPorts(SCHEMA_REGISTRY_INTERNAL_PORT)
-                .withEnv("SCHEMA_REGISTRY_HOST_NAME", "schema-registry")
-                .withEnv("SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", "kafka:" + KAFKA_INTERNAL_PORT)
-                .waitingFor(Wait.forHttp("/subjects").forPort(SCHEMA_REGISTRY_INTERNAL_PORT).withStartupTimeout(Duration.ofMinutes(2)));
-        schemaRegistry.start();
-        log.info("Schema Registry started");
-
-        // Build Kafka Connect image with Avro converters from project Dockerfile
-        kafkaConnect = new GenericContainer<>(new ImageFromDockerfile()
-                .withDockerfile(Path.of("../docker/connect/Dockerfile")))
-                .withNetwork(network)
-                .withNetworkAliases("kafka-connect")
-                .withExposedPorts(KAFKA_CONNECT_PORT)
-                .withEnv("BOOTSTRAP_SERVERS", "kafka:" + KAFKA_INTERNAL_PORT)
-                .withEnv("GROUP_ID", "connect-cluster")
-                .withEnv("CONFIG_STORAGE_TOPIC", "connect-configs")
-                .withEnv("OFFSET_STORAGE_TOPIC", "connect-offsets")
-                .withEnv("STATUS_STORAGE_TOPIC", "connect-status")
-                .withEnv("CONFIG_STORAGE_REPLICATION_FACTOR", "1")
-                .withEnv("OFFSET_STORAGE_REPLICATION_FACTOR", "1")
-                .withEnv("STATUS_STORAGE_REPLICATION_FACTOR", "1")
-                .withEnv("KEY_CONVERTER", "io.confluent.connect.avro.AvroConverter")
-                .withEnv("KEY_CONVERTER_SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
-                .withEnv("VALUE_CONVERTER", "io.confluent.connect.avro.AvroConverter")
-                .withEnv("VALUE_CONVERTER_SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
-                .withEnv("SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
-                .withEnv("CONNECT_KEY_CONVERTER_SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
-                .withEnv("CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
-                .waitingFor(Wait.forHttp("/connectors").forPort(KAFKA_CONNECT_PORT).withStartupTimeout(Duration.ofMinutes(3)));
-        kafkaConnect.start();
-        log.info("Kafka Connect started");
-
-        app = new GenericContainer<>(new ImageFromDockerfile()
-                .withFileFromPath("target/app-1.0.0-SNAPSHOT.jar", Path.of("../app/target/app-1.0.0-SNAPSHOT.jar"))
-                .withDockerfileFromBuilder(builder -> builder.from("eclipse-temurin:21-jre-jammy")
-                        .workDir("/app")
-                        .copy("target/app-1.0.0-SNAPSHOT.jar", "app.jar")
-                        .cmd("java", "-jar", "app.jar").build()))
-                .withNetwork(network)
-                .withNetworkAliases("app")
-                .withExposedPorts(8080)
-                .withEnv("SPRING_DATASOURCE_URL", "jdbc:postgresql://postgres:5432/eventdb")
-                .withEnv("SPRING_DATASOURCE_USERNAME", "postgres")
-                .withEnv("SPRING_DATASOURCE_PASSWORD", "postgres")
-                .waitingFor(Wait.forHttp("/api/events").forPort(8080).withStartupTimeout(Duration.ofMinutes(2)));
-        app.start();
-        log.info("App started");
-
-        transformer = new GenericContainer<>(new ImageFromDockerfile()
-                .withFileFromPath("target/transformer-1.0.0-SNAPSHOT.jar", Path.of("../transformer/target/transformer-1.0.0-SNAPSHOT.jar"))
-                .withDockerfileFromBuilder(builder -> builder.from("eclipse-temurin:21-jre-jammy")
-                        .workDir("/app")
-                        .copy("target/transformer-1.0.0-SNAPSHOT.jar", "transformer.jar")
-                        .cmd("java", "-jar", "transformer.jar").build()))
-                .withNetwork(network)
-                .withNetworkAliases("transformer")
-                .withExposedPorts(8081)
-                .withEnv("SPRING_KAFKA_BOOTSTRAP_SERVERS", "kafka:" + KAFKA_INTERNAL_PORT)
-                .withEnv("SPRING_CLOUD_STREAM_KAFKA_STREAMS_BINDER_CONFIGURATION_SCHEMA_REGISTRY_URL", "http://schema-registry:" + SCHEMA_REGISTRY_INTERNAL_PORT)
-                .withEnv("APP_SERVICE_URL", "http://app:8080")
-                .waitingFor(Wait.forListeningPort().withStartupTimeout(Duration.ofMinutes(2)));
-        transformer.start();
-        log.info("Transformer started");
-
-        // Wait for transformer to fully initialize Kafka Streams
-        log.info("Waiting for transformer to initialize...");
-        Thread.sleep(10000);
-
-        registerDebeziumConnector();
-        waitForConnectorRunning();
-
-        // List topics for debugging
-        try {
-            var result = kafka.execInContainer("kafka-topics", "--bootstrap-server", "localhost:9092", "--list");
-            log.info("Available Kafka topics: {}", result.getStdout());
-        } catch (Exception e) {
-            log.warn("Could not list Kafka topics", e);
-        }
-    }
-
-    @AfterAll
-    static void stopContainers() {
-        log.info("Stopping containers...");
-        if (transformer != null) transformer.stop();
-        if (app != null) app.stop();
-        if (kafkaConnect != null) kafkaConnect.stop();
-        if (schemaRegistry != null) schemaRegistry.stop();
-        if (kafka != null) kafka.stop();
-        if (zookeeper != null) zookeeper.stop();
-        if (postgres != null) postgres.stop();
-        if (network != null) network.close();
-        log.info("Containers stopped");
+        listKafkaTopics();
     }
 
     @Test
     void testCreateAndUpdateEventAppearsInKafkaTopic() throws Exception {
         List<GenericRecord> receivedEvents = Collections.synchronizedList(new ArrayList<>());
 
-        try (KafkaConsumer<GenericRecord, GenericRecord> consumer = createAvroConsumer()) {
-            consumer.subscribe(Collections.singletonList(EVENT_DETAILS_TOPIC));
+        // Start consuming in a background thread
+        Thread consumerThread = kafkaHelper.startBackgroundConsumer(EVENT_DETAILS_TOPIC, receivedEvents);
 
-            // Start consuming in a background thread
-            Thread consumerThread = new Thread(() -> {
-                while (!Thread.currentThread().isInterrupted()) {
-                    ConsumerRecords<GenericRecord, GenericRecord> records = consumer.poll(Duration.ofMillis(100));
-                    for (ConsumerRecord<GenericRecord, GenericRecord> record : records) {
-                        try {
-                            log.info("Received event: {}", record.value());
-                            receivedEvents.add(record.value());
-                        } catch (Exception e) {
-                            log.error("Failed to process event", e);
-                        }
-                    }
-                }
-            });
-            consumerThread.start();
-
+        try {
             // Create an event via REST API
-            String appUrl = getAppUrl();
-            log.info("Creating event via REST API at {}", appUrl);
-
-            JsonNode createdEvent = createEvent(appUrl, "test-event-1");
+            log.info("Creating event via REST API at {}", getAppUrl());
+            var createdEvent = httpHelper.createEvent("test-event-1");
             assertNotNull(createdEvent);
             long eventId = createdEvent.get("id").asLong();
             log.info("Created event with ID: {}", eventId);
@@ -266,7 +67,7 @@ public class CdcPipelineIT {
             log.info("Create event appeared in Kafka topic");
 
             // Update the event via REST API
-            JsonNode updatedEvent = updateEvent(appUrl, eventId, "test-event-1-updated");
+            var updatedEvent = httpHelper.updateEvent(eventId, "test-event-1-updated");
             assertNotNull(updatedEvent);
             assertEquals("test-event-1-updated", updatedEvent.get("name").asText());
             log.info("Updated event: {}", updatedEvent);
@@ -279,7 +80,7 @@ public class CdcPipelineIT {
                                     && "test-event-1-updated".equals(e.get("name").toString())));
 
             log.info("Update event appeared in Kafka topic");
-
+        } finally {
             // Stop consumer thread
             consumerThread.interrupt();
             consumerThread.join(5000);
@@ -294,105 +95,5 @@ public class CdcPipelineIT {
                 "Should have received the updated event");
 
         log.info("Test completed successfully! Received {} events total", receivedEvents.size());
-    }
-
-    private static String getKafkaConnectUrl() {
-        return "http://" + kafkaConnect.getHost() + ":" + kafkaConnect.getMappedPort(KAFKA_CONNECT_PORT);
-    }
-
-    private static String getAppUrl() {
-        return "http://" + app.getHost() + ":" + app.getMappedPort(8080);
-    }
-
-    private static String getSchemaRegistryUrlExternal() {
-        return "http://" + schemaRegistry.getHost() + ":" + schemaRegistry.getMappedPort(SCHEMA_REGISTRY_INTERNAL_PORT);
-    }
-
-    private static String getKafkaBootstrapServersExternal() {
-        return "localhost:" + kafka.getMappedPort(KAFKA_EXTERNAL_PORT);
-    }
-
-    private static void registerDebeziumConnector() throws Exception {
-        postgres.execInContainer("psql", "-U", "postgres", "-d", "eventdb", "-c", "CREATE PUBLICATION event_publication FOR TABLE public.event;");
-
-        String connectorConfig = String.format("""
-                {
-                  "name": "event-connector",
-                  "config": {
-                    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
-                    "database.hostname": "postgres", "database.port": "5432", "database.user": "postgres",
-                    "database.password": "postgres", "database.dbname": "eventdb",
-                    "topic.prefix": "dbserver1", "table.include.list": "public.event",
-                    "plugin.name": "pgoutput", "slot.name": "event_slot", "publication.name": "event_publication"
-                  }
-                }""");
-
-        HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
-                .uri(URI.create(getKafkaConnectUrl() + "/connectors"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(connectorConfig)).build(), HttpResponse.BodyHandlers.ofString());
-        log.info("Debezium connector registration response: {} - {}", response.statusCode(), response.body());
-        assertTrue(response.statusCode() == 201 || response.statusCode() == 409, "Failed to register connector");
-    }
-
-    private static void waitForConnectorRunning() {
-        await().atMost(90, TimeUnit.SECONDS).pollInterval(3, TimeUnit.SECONDS).until(() -> {
-            try {
-                HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
-                        .uri(URI.create(getKafkaConnectUrl() + "/connectors/event-connector/status")).build(), HttpResponse.BodyHandlers.ofString());
-                if (response.statusCode() == 200) {
-                    var status = objectMapper.readTree(response.body());
-                    String connectorState = status.path("connector").path("state").asText();
-                    var tasks = status.path("tasks");
-                    log.info("Connector state: {}, tasks: {}", connectorState, tasks);
-                    if ("RUNNING".equals(connectorState) && tasks.size() > 0 &&
-                            "RUNNING".equals(tasks.get(0).path("state").asText())) {
-                        log.info("Debezium connector and task are running");
-                        return true;
-                    }
-                }
-            } catch (Exception e) {
-                log.debug("Waiting for connector: {}", e.getMessage());
-            }
-            return false;
-        });
-    }
-
-    private KafkaConsumer<GenericRecord, GenericRecord> createAvroConsumer() {
-        Properties props = new Properties();
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, getKafkaBootstrapServersExternal());
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "it-consumer-" + System.currentTimeMillis());
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, KafkaAvroDeserializer.class.getName());
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, KafkaAvroDeserializer.class.getName());
-        props.put(KafkaAvroDeserializerConfig.SCHEMA_REGISTRY_URL_CONFIG, getSchemaRegistryUrlExternal());
-        props.put(KafkaAvroDeserializerConfig.SPECIFIC_AVRO_READER_CONFIG, "false");
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        return new KafkaConsumer<>(props);
-    }
-
-    private JsonNode createEvent(String appUrl, String name) throws IOException, InterruptedException {
-        String body = String.format("{\"name\": \"%s\"}", name);
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(appUrl + "/api/events"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "Failed to create event: " + response.body());
-        return objectMapper.readTree(response.body());
-    }
-
-    private JsonNode updateEvent(String appUrl, long id, String newName) throws IOException, InterruptedException {
-        String body = String.format("{\"name\": \"%s\"}", newName);
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(appUrl + "/api/events/" + id))
-                .header("Content-Type", "application/json")
-                .PUT(HttpRequest.BodyPublishers.ofString(body))
-                .build();
-
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode(), "Failed to update event: " + response.body());
-        return objectMapper.readTree(response.body());
     }
 }
